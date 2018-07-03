@@ -5,6 +5,7 @@ metadata:
   name: redis-cluster
   labels:
     app: redis-cluster
+  namespace: production
 data:
   redis.conf: |+
     cluster-enabled yes
@@ -14,6 +15,9 @@ data:
     cluster-migration-barrier 1
     appendonly yes
     protected-mode no
+    maxmemory 1024mb
+    maxmemory-policy volatile-lfu
+    dir /data/
 ---
 apiVersion: v1
 kind: Service
@@ -23,6 +27,7 @@ metadata:
   name: redis-cluster
   labels:
     app: redis-cluster
+  namespace: production
 spec:
   ports:
   - port: 6379
@@ -41,17 +46,44 @@ metadata:
   name: redis-cluster
   labels:
     app: redis-cluster
+  namespace: production
 spec:
   serviceName: redis-cluster
-  replicas: 6
+  replicas: 3
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
       labels:
         app: redis-cluster
     spec:
+      terminationGracePeriodSeconds: 60
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - redis-cluster
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kops.k8s.io/instancegroup: redis-deeplinks
       containers:
+      - name: redis-exporter
+        image: oliver006/redis_exporter:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        ports:
+          - containerPort: 9121
       - name: redis-cluster
-        image: redis-cluster:v1
+        image: foxdalas/redis-cluster:v4.0.10
         ports:
         - containerPort: 6379
           name: client
@@ -89,15 +121,27 @@ spec:
           items: 
           - key: redis.conf
             path: redis.conf
+  updateStrategy:
+    type: RollingUpdate
   volumeClaimTemplates:
   - metadata:
       name: data
-      labels:
-        name: redis-cluster
-      annotations:
-        volume.alpha.kubernetes.io/storage-class: anything
     spec:
-      accessModes: [ "ReadWriteOnce" ]
+      accessModes:
+        - "ReadWriteOnce"
+      storageClassName: ebs-ha
       resources:
         requests:
-          storage: 100Mi
+          storage: 10Gi
+---
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-cluster-budget
+  labels:
+    app: redis-cluster
+spec:
+  selector:
+    matchLabels:
+      app: redis-cluster
+  maxUnavailable: 1
